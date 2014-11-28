@@ -377,8 +377,45 @@ static int     read_mappings(ldap_instance* inst);
 static inline int ldap_get_conn(LDAP_CONN *conns,LDAP_CONN **ret,
 				ldap_instance *inst)
 {
+	static unsigned int start=0;
 	register int i = 0;
+	unsigned int num_locked_conns=1;
+	unsigned int num_bound_conns=0;
+	
+	// Count locked connections
+	for(i=0;i<inst->num_conns;i++){
+		if (conns[i].locked == 1) {
+			num_locked_conns++;
+		}
+		if (conns[i].bound == 1){
+			num_bound_conns++;
+		}
+	}
 
+	// walk from start to num_conns and to start again
+	for(i=start;i<inst->num_conns;i++){
+		DEBUG("  [%s] ldap_get_conn: Checking Id: %d",
+		      inst->xlat_name, i);
+		if (conns[i].bound == 0 && num_locked_conns*2<=num_bound_conns){
+			// avoid rebinding in the upper range, if there are enough connections bound
+			continue;
+		}
+		if ((pthread_mutex_trylock(&conns[i].mutex) == 0)) {
+			if (conns[i].locked == 1) {
+				/* connection is already being used */
+				pthread_mutex_unlock(&(conns[i].mutex));
+				continue;
+			}
+			/* found an unused connection */
+			*ret = &conns[i];
+			conns[i].uses++;
+			conns[i].locked = 1;
+			DEBUG("  [%s] ldap_get_conn: Got Id: %d",
+			      inst->xlat_name, i);
+			return i;
+		}
+	}
+	// allways allow binding in the lower range, avoid returning -1
 	for(i=0;i<inst->num_conns;i++){
 		DEBUG("  [%s] ldap_get_conn: Checking Id: %d",
 		      inst->xlat_name, i);
@@ -396,6 +433,13 @@ static inline int ldap_get_conn(LDAP_CONN *conns,LDAP_CONN **ret,
 			      inst->xlat_name, i);
 			return i;
 		}
+	}
+	
+	// balance over all connections, when max_uses is activated
+	if(inst->max_uses > 0){
+		start++;
+		start%=inst->num_conns;    // Back to 0 when num_conns is reached
+		start%=num_locked_conns*2; // Limit to 2 time the locked connections
 	}
 
 	return -1;
